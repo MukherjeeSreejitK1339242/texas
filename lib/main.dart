@@ -1,218 +1,127 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
 import 'dart:math';
+import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-class Room {
-  String code;
-  double startingCash;
-  List<String> players;
-  String host;
-
-  Room({required this.code, required this.startingCash, required this.host})
-      : players = [host];
-
-  void addPlayer(String playerName) {
-    players.add(playerName);
-  }
-}
-
-Room? currentRoom;
-Map<String, Room> rooms = {};
+enum GamePhase { Preflop, Flop, Turn, River, Showdown }
 
 class CardModel {
-  final int value;
   final String suit;
+  final String rank;
 
-  CardModel({required this.value, required this.suit});
+  CardModel({required this.suit, required this.rank});
+
+  String get paddedRank {
+    final numeric = int.tryParse(rank);
+    if (numeric != null && rank.length == 1) {
+      return numeric.toString().padLeft(2, '0');
+    }
+    return rank;
+  }
+
+  String get imageName => 'card_${suit.toLowerCase()}_${paddedRank.toUpperCase()}.png';
 }
 
-CardModel parseCard(String cardStr) {
-  String valueStr = cardStr.substring(0, cardStr.length - 1);
-  String suit = cardStr.substring(cardStr.length - 1);
-  int value;
-  if (valueStr == 'J') {
-    value = 11;
-  } else if (valueStr == 'Q') {
-    value = 12;
-  } else if (valueStr == 'K') {
-    value = 13;
-  } else if (valueStr == 'A') {
-    value = 14;
-  } else {
-    value = int.tryParse(valueStr) ?? 0;
-  }
-  return CardModel(value: value, suit: suit);
-}
+class Deck {
+  final List<CardModel> cards = [];
 
-class HandValue implements Comparable<HandValue> {
-  final int rank;
-  final List<int> tiebreakers;
-
-  HandValue(this.rank, this.tiebreakers);
-
-  @override
-  int compareTo(HandValue other) {
-    if (rank != other.rank) return rank.compareTo(other.rank);
-    for (int i = 0; i < tiebreakers.length && i < other.tiebreakers.length; i++) {
-      if (tiebreakers[i] != other.tiebreakers[i]) {
-        return tiebreakers[i].compareTo(other.tiebreakers[i]);
-      }
-    }
-    return 0;
-  }
-}
-
-List<List<T>> getCombinations<T>(List<T> list, int k) {
-  List<List<T>> result = [];
-  void combine(int start, List<T> current) {
-    if (current.length == k) {
-      result.add(List.from(current));
-      return;
-    }
-    for (int i = start; i < list.length; i++) {
-      current.add(list[i]);
-      combine(i + 1, current);
-      current.removeLast();
-    }
-  }
-  combine(0, []);
-  return result;
-}
-
-HandValue evaluateFiveCardHand(List<CardModel> hand) {
-  hand.sort((a, b) => b.value.compareTo(a.value));
-  List<int> values = hand.map((c) => c.value).toList();
-  Map<int, int> freq = {};
-  for (var v in values) {
-    freq[v] = (freq[v] ?? 0) + 1;
-  }
-  bool isFlush = hand.every((c) => c.suit == hand[0].suit);
-
-  List<int> uniqueValues = freq.keys.toList()..sort((a, b) => b.compareTo(a));
-  bool isStraight = false;
-  int straightHigh = 0;
-  if (uniqueValues.length >= 5) {
-    for (int i = 0; i <= uniqueValues.length - 5; i++) {
-      List<int> seq = uniqueValues.sublist(i, i + 5);
-      if (seq[0] - seq[4] == 4) {
-        isStraight = true;
-        straightHigh = seq[0];
-        break;
-      }
-    }
-    if (!isStraight && uniqueValues.contains(14)) {
-      List<int> aceLow = List.from(uniqueValues);
-      aceLow.remove(14);
-      aceLow.add(1);
-      aceLow.sort((a, b) => b.compareTo(a));
-      for (int i = 0; i <= aceLow.length - 5; i++) {
-        List<int> seq = aceLow.sublist(i, i + 5);
-        if (seq[0] - seq[4] == 4) {
-          isStraight = true;
-          straightHigh = seq[0] == 1 ? 5 : seq[0];
-          break;
-        }
+  Deck() {
+    const suits = ['clubs', 'diamonds', 'hearts', 'spades'];
+    const ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+    for (var suit in suits) {
+      for (var rank in ranks) {
+        cards.add(CardModel(suit: suit, rank: rank));
       }
     }
   }
 
-  if (isFlush && isStraight) return HandValue(8, [straightHigh]);
-  if (freq.values.contains(4)) {
-    int quad = freq.keys.firstWhere((v) => freq[v] == 4);
-    int kicker = freq.keys.where((v) => v != quad).fold(0, max);
-    return HandValue(7, [quad, kicker]);
+  void shuffle() {
+    cards.shuffle(Random());
   }
-  if (freq.values.contains(3) && freq.values.contains(2) ||
-      freq.values.where((v) => v == 3).length >= 2) {
-    List<int> trips = freq.keys.where((v) => freq[v]! >= 3).toList()..sort((a, b) => b.compareTo(a));
-    List<int> pairs = freq.keys.where((v) => freq[v]! >= 2 && v != trips.first).toList()..sort((a, b) => b.compareTo(a));
-    int trip = trips.first;
-    int pair = pairs.isNotEmpty ? pairs.first : trips.length > 1 ? trips[1] : 0;
-    return HandValue(6, [trip, pair]);
-  }
-  if (isFlush) return HandValue(5, values.sublist(0, 5));
-  if (isStraight) return HandValue(4, [straightHigh]);
-  if (freq.values.contains(3)) {
-    int trip = freq.keys.firstWhere((v) => freq[v] == 3);
-    List<int> kickers = freq.keys.where((v) => v != trip).toList()..sort((a, b) => b.compareTo(a));
-    return HandValue(3, [trip] + kickers.take(2).toList());
-  }
-  List<int> pairValues = freq.keys.where((v) => freq[v]! >= 2).toList()..sort((a, b) => b.compareTo(a));
-  if (pairValues.length >= 2) {
-    int highPair = pairValues[0];
-    int lowPair = pairValues[1];
-    int kicker = freq.keys.where((v) => v != highPair && v != lowPair).fold(0, max);
-    return HandValue(2, [highPair, lowPair, kicker]);
-  }
-  if (freq.values.contains(2)) {
-    int pair = freq.keys.firstWhere((v) => freq[v] == 2);
-    List<int> kickers = freq.keys.where((v) => v != pair).toList()..sort((a, b) => b.compareTo(a));
-    return HandValue(1, [pair] + kickers.take(3).toList());
-  }
-  return HandValue(0, values.take(5).toList());
+
+  CardModel dealCard() => cards.removeLast();
 }
 
-HandValue evaluateHand(List<String> cardStrs) {
-  List<CardModel> cards = cardStrs.map(parseCard).toList();
-  List<List<CardModel>> combinations = getCombinations(cards, 5);
-  HandValue best = evaluateFiveCardHand(combinations.first);
-  for (var combo in combinations.skip(1)) {
-    HandValue current = evaluateFiveCardHand(combo);
-    if (current.compareTo(best) > 0) best = current;
-  }
-  return best;
+class GamePlayer {
+  final String id;
+  int money;
+  List<CardModel> hand;
+  bool folded;
+
+  GamePlayer({required this.id, this.money = 1000, List<CardModel>? hand, this.folded = false})
+      : hand = hand ?? [];
 }
 
-class BettingRound {
-  final List<String> players;
-  int currentPlayerIndex = 0;
-  double currentBet = 0;
+/// Rank values for hand evaluation.
+const Map<String, int> rankValues = {
+  '2': 2,
+  '3': 3,
+  '4': 4,
+  '5': 5,
+  '6': 6,
+  '7': 7,
+  '8': 8,
+  '9': 9,
+  '10': 10,
+  'J': 11,
+  'Q': 12,
+  'K': 13,
+  'A': 14,
+};
 
-  BettingRound(this.players);
-
-  String getCurrentPlayer() => players[currentPlayerIndex];
-
-  void nextPlayer() {
-    currentPlayerIndex = (currentPlayerIndex + 1) % players.length;
-  }
+/// Generate a random 6-character join code.
+String generateJoinCode() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  final rand = Random();
+  return List.generate(6, (index) => chars[rand.nextInt(chars.length)]).join();
 }
 
-void main() {
-  runApp(TexasHoldemApp());
+/// MAIN
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Supabase.initialize(
+    url: 'https://vzzunozvverrorshindf.supabase.co',
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ6enVub3p2dmVycm9yc2hpbmRmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDI0MDIyNDUsImV4cCI6MjA1Nzk3ODI0NX0.2DhqtwQP9CJyXUp7Ayqnsmz4wmFsvvRTXSS0Ju_htXs',
+  );
+  runApp(const MyApp());
 }
 
-class TexasHoldemApp extends StatelessWidget {
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Texas Holdem',
+      title: 'Texas Hold’em',
+      theme: ThemeData(primarySwatch: Colors.green),
       initialRoute: '/',
       routes: {
-        '/': (context) => HomeScreen(),
-        '/create': (context) => CreateRoomScreen(),
-        '/join': (context) => JoinRoomScreen(),
-        '/lobby': (context) => LobbyScreen(),
-        '/game': (context) => GameScreen(),
+        '/': (context) => const HomePage(),
+        '/create': (context) => const CreateRoomPage(),
+        '/join': (context) => const JoinRoomPage(),
+        '/game': (context) => const GamePage(),
       },
     );
   }
 }
 
-class HomeScreen extends StatelessWidget {
+/// Home Screen: Choose to create or join a room.
+class HomePage extends StatelessWidget {
+  const HomePage({super.key});
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Texas Holdem')),
+      appBar: AppBar(title: const Text('Texas Hold’em Home')),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
+          children: [
             ElevatedButton(
-              child: Text('Create Room'),
+              child: const Text('Create Room'),
               onPressed: () => Navigator.pushNamed(context, '/create'),
             ),
-            SizedBox(height: 20),
+            const SizedBox(height: 20),
             ElevatedButton(
-              child: Text('Join Room'),
+              child: const Text('Join Room'),
               onPressed: () => Navigator.pushNamed(context, '/join'),
             ),
           ],
@@ -222,415 +131,439 @@ class HomeScreen extends StatelessWidget {
   }
 }
 
-class CreateRoomScreen extends StatefulWidget {
+/// Create Room Screen.
+class CreateRoomPage extends StatefulWidget {
+  const CreateRoomPage({super.key});
   @override
-  _CreateRoomScreenState createState() => _CreateRoomScreenState();
+  _CreateRoomPageState createState() => _CreateRoomPageState();
 }
 
-class _CreateRoomScreenState extends State<CreateRoomScreen> {
-  final _formKey = GlobalKey<FormState>();
+class _CreateRoomPageState extends State<CreateRoomPage> {
   final TextEditingController _nameController = TextEditingController();
-  final TextEditingController _cashController = TextEditingController(text: "10000");
-  String roomCode = '';
+  bool _isPrivate = true;
+  bool _isLoading = false;
+  final String _userId = "user-123"; // Replace with your user identification logic.
 
-  String generateRoomCode() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    Random rnd = Random();
-    return String.fromCharCodes(
-      Iterable.generate(6, (_) => chars.codeUnitAt(rnd.nextInt(chars.length))),
-    );
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    roomCode = generateRoomCode();
-  }
-
-  void createRoom() {
-    if (_formKey.currentState!.validate()) {
-      String hostName = _nameController.text;
-      double startingCash = double.tryParse(_cashController.text) ?? 1000;
-      String roomCodeKey = roomCode.trim().toUpperCase();
-      currentRoom = Room(code: roomCodeKey, startingCash: startingCash, host: hostName);
-      rooms[roomCodeKey] = currentRoom!;
-      Navigator.pushNamed(context, '/lobby');
+  Future<void> _createRoom() async {
+    final roomName = _nameController.text.trim();
+    if (roomName.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text("Enter a room name")));
+      return;
+    }
+    setState(() => _isLoading = true);
+    final joinCode = generateJoinCode();
+    try {
+      final List<dynamic> roomResponse = await Supabase.instance.client
+          .from('rooms')
+          .insert({
+        'name': roomName,
+        'owner_id': _userId,
+        'private': _isPrivate,
+        'join_code': joinCode,
+      }).select();
+      if (roomResponse.isEmpty) throw Exception("Room creation failed.");
+      final room = roomResponse[0];
+      // Insert the creator into room_members.
+      await Supabase.instance.client.from('room_members').insert({
+        'room_id': room['id'],
+        'user_id': _userId,
+      }).select();
+      setState(() => _isLoading = false);
+      if (!mounted) return;
+      Navigator.pushReplacementNamed(context, '/game', arguments: {
+        'roomId': room['id'],
+        'isHost': true,
+        'joinCode': joinCode,
+      });
+    } catch (e) {
+      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.toString())));
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Create Room')),
+      appBar: AppBar(title: const Text('Create Room')),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            children: <Widget>[
-              Text('Room Code: $roomCode', style: TextStyle(fontSize: 20)),
-              SizedBox(height: 20),
-              TextFormField(
-                controller: _nameController,
-                decoration: InputDecoration(labelText: 'Your Name (Host)'),
-                validator: (value) =>
-                    (value == null || value.isEmpty) ? 'Please enter your name' : null,
-              ),
-              TextFormField(
-                controller: _cashController,
-                decoration: InputDecoration(labelText: 'Starting Cash'),
-                keyboardType: TextInputType.number,
-                validator: (value) {
-                  if (value == null || value.isEmpty) return 'Please enter a starting cash amount';
-                  if (double.tryParse(value) == null) return 'Enter a valid number';
-                  return null;
-                },
-              ),
-              SizedBox(height: 20),
-              ElevatedButton(child: Text('Create Room'), onPressed: createRoom),
-            ],
-          ),
+        child: Column(
+          children: [
+            TextField(
+              controller: _nameController,
+              decoration: const InputDecoration(labelText: 'Room Name'),
+            ),
+            SwitchListTile(
+              title: const Text('Private Room'),
+              value: _isPrivate,
+              onChanged: (val) => setState(() => _isPrivate = val),
+            ),
+            const SizedBox(height: 20),
+            _isLoading
+                ? const CircularProgressIndicator()
+                : ElevatedButton(
+                    child: const Text('Create'),
+                    onPressed: _createRoom,
+                  ),
+          ],
         ),
       ),
     );
   }
 }
 
-class JoinRoomScreen extends StatefulWidget {
+/// Join Room Screen.
+class JoinRoomPage extends StatefulWidget {
+  const JoinRoomPage({super.key});
   @override
-  _JoinRoomScreenState createState() => _JoinRoomScreenState();
+  _JoinRoomPageState createState() => _JoinRoomPageState();
 }
 
-class _JoinRoomScreenState extends State<JoinRoomScreen> {
-  final _formKey = GlobalKey<FormState>();
-  final TextEditingController _roomCodeController = TextEditingController();
-  final TextEditingController _nameController = TextEditingController();
+class _JoinRoomPageState extends State<JoinRoomPage> {
+  final TextEditingController _joinCodeController = TextEditingController();
+  bool _isLoading = false;
+  final String _userId = "user-456"; // Replace with your user identification logic.
 
-  void joinRoom() {
-    if (_formKey.currentState!.validate()) {
-      String roomCodeInput = _roomCodeController.text.trim().toUpperCase();
-      String playerName = _nameController.text;
-      if (rooms.containsKey(roomCodeInput)) {
-        currentRoom = rooms[roomCodeInput]!;
-        currentRoom!.addPlayer(playerName);
-        Navigator.pushNamed(context, '/lobby');
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Room not found or invalid code')),
-        );
-      }
+  Future<void> _joinRoom() async {
+    final joinCode = _joinCodeController.text.trim();
+    if (joinCode.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text("Enter a join code")));
+      return;
+    }
+    setState(() => _isLoading = true);
+    try {
+      final roomResponse = await Supabase.instance.client
+          .from('rooms')
+          .select()
+          .eq('join_code', joinCode)
+          .maybeSingle();
+      if (roomResponse == null)
+        throw Exception("Room not found. Check join code.");
+      final roomId = roomResponse['id'];
+      await Supabase.instance.client.from('room_members').insert({
+        'room_id': roomId,
+        'user_id': _userId,
+      }).select();
+      setState(() => _isLoading = false);
+      if (!mounted) return;
+      Navigator.pushReplacementNamed(context, '/game', arguments: {
+        'roomId': roomId,
+        'isHost': false,
+      });
+    } catch (e) {
+      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.toString())));
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Join Room')),
+      appBar: AppBar(title: const Text('Join Room')),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            children: <Widget>[
-              TextFormField(
-                controller: _roomCodeController,
-                decoration: InputDecoration(labelText: 'Room Code'),
-                validator: (value) =>
-                    (value == null || value.isEmpty) ? 'Please enter the room code' : null,
-              ),
-              TextFormField(
-                controller: _nameController,
-                decoration: InputDecoration(labelText: 'Your Name'),
-                validator: (value) =>
-                    (value == null || value.isEmpty) ? 'Please enter your name' : null,
-              ),
-              SizedBox(height: 20),
-              ElevatedButton(child: Text('Join Room'), onPressed: joinRoom),
-            ],
-          ),
+        child: Column(
+          children: [
+            TextField(
+              controller: _joinCodeController,
+              decoration: const InputDecoration(labelText: 'Join Code'),
+            ),
+            const SizedBox(height: 20),
+            _isLoading
+                ? const CircularProgressIndicator()
+                : ElevatedButton(
+                    child: const Text('Join'),
+                    onPressed: _joinRoom,
+                  ),
+          ],
         ),
       ),
     );
   }
 }
 
-class LobbyScreen extends StatelessWidget {
-  void startGame(BuildContext context) {
-    Navigator.pushNamed(context, '/game');
-  }
-
+/// Game Screen: Handles game state, turn order, and realtime player updates.
+class GamePage extends StatefulWidget {
+  const GamePage({super.key});
   @override
-  Widget build(BuildContext context) {
-    bool isHost = (currentRoom != null && currentRoom!.players.first == currentRoom!.host);
-    return Scaffold(
-      appBar: AppBar(title: Text('Lobby - Room ${currentRoom?.code ?? ''}')),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: currentRoom == null
-            ? Center(child: Text('No room found'))
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text('Players:', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                  ...currentRoom!.players.map((player) => Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4.0),
-                        child: Text(player, style: TextStyle(fontSize: 18)),
-                      )),
-                  SizedBox(height: 20),
-                  if (isHost)
-                    ElevatedButton(child: Text('Start Game'), onPressed: () => startGame(context))
-                  else
-                    Text('Waiting for host to start the game...'),
-                ],
-              ),
-      ),
-    );
-  }
+  _GamePageState createState() => _GamePageState();
 }
 
-class GameScreen extends StatefulWidget {
-  @override
-  _GameScreenState createState() => _GameScreenState();
-}
+class _GamePageState extends State<GamePage> {
+  late String roomId;
+  late bool isHost;
+  String? joinCode; // Only provided for host.
+  GamePhase phase = GamePhase.Preflop;
+  int currentBet = 0;
+  int potTotal = 0;
+  List<CardModel> communityCardsFull = [];
+  List<CardModel> communityCardsDisplayed = [];
+  List<GamePlayer> players = [];
+  final String currentUserId = "user-123";
+  late Deck deck;
 
-class _GameScreenState extends State<GameScreen> {
-  final List<String> deck = [
-    '02D', '03D', '04D', '05D', '06D', '07D', '08D', '09D', '010D', 'JD', 'QD', 'KD', 'AD',
-    '02H', '03H', '04H', '05H', '06H', '07H', '08H', '09H', '010H', 'JH', 'QH', 'KH', 'AH',
-    '02C', '03C', '04C', '05C', '06C', '07C', '08C', '09C', '010C', 'JC', 'QC', 'KC', 'AC',
-    '02S', '03S', '04S', '05S', '06S', '07S', '08S', '09S', '010S', 'JS', 'QS', 'KS', 'AS',
-  ];
-  List<String> shuffledDeck = [];
-  Map<String, List<String>> playerCards = {};
-  List<String> communityCards = [];
-  List<bool> communityCardsFaceUp = [false, false, false, false, false];
-
-  BettingRound? bettingRound;
-  Set<String> foldedPlayers = {};
-  Map<String, double> playerContributions = {};
-  Map<String, double> roundStartContributions = {};
-  Map<String, double> playerChips = {};
-  int stage = 0;
+  // Turn and betting variables.
+  int currentPlayerIndex = 0;
+  Map<String, int> roundBets = {};
+  bool bettingRoundActive = true;
   final TextEditingController _betController = TextEditingController();
-  final TextEditingController _raiseController = TextEditingController();
+  bool gameStarted = false;
+
+  // Stream subscription for realtime updates.
+  StreamSubscription<List<dynamic>>? _roomSubscription;
 
   @override
   void initState() {
     super.initState();
-    startNewHand();
+    deck = Deck();
+    deck.shuffle();
+    // Pre-deal five community cards.
+    communityCardsFull = List.generate(5, (_) => deck.dealCard());
+    communityCardsDisplayed =
+        List.generate(5, (_) => CardModel(suit: '', rank: 'BACK'));
+    roundBets[currentUserId] = 0;
   }
 
-  void startNewHand() {
-    shuffledDeck = List.from(deck)..shuffle(Random());
-    foldedPlayers.clear();
-    playerContributions.clear();
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>;
+    roomId = args['roomId'];
+    isHost = args['isHost'];
+    if (isHost && args.containsKey('joinCode')) {
+      joinCode = args['joinCode'];
+    }
+    // Initially fetch room members.
+    _fetchRoomMembers();
+    // Subscribe to realtime updates using the stream API.
+    _subscribeToRoomMembers();
+  }
 
-    if (currentRoom != null) {
-      for (var player in currentRoom!.players) {
-        if (!playerChips.containsKey(player)) {
-          playerChips[player] = currentRoom!.startingCash;
+  Future<void> _fetchRoomMembers() async {
+    final response = await Supabase.instance.client
+        .from('room_members')
+        .select()
+        .eq('room_id', roomId);
+    if (response != null) {
+      final members = response as List;
+      setState(() {
+        players = members.map((m) => GamePlayer(id: m['user_id'])).toList();
+        // Ensure current user is present.
+        if (!players.any((p) => p.id == currentUserId)) {
+          players.add(GamePlayer(id: currentUserId));
         }
-      }
-    }
-
-    dealCards();
-    communityCards = List.generate(5, (_) => shuffledDeck.removeAt(0));
-    communityCardsFaceUp = [false, false, false, false, false];
-    stage = 0;
-    resetBettingRound();
-  }
-
-  void dealCards() {
-    if (currentRoom != null) {
-      for (var player in currentRoom!.players) {
-        playerCards[player] = [shuffledDeck.removeAt(0), shuffledDeck.removeAt(0)];
-      }
+      });
     }
   }
 
-  void resetBettingRound() {
-    List<String> activePlayers = currentRoom!.players.where((p) => !foldedPlayers.contains(p)).toList();
+  void _subscribeToRoomMembers() {
+    _roomSubscription = Supabase.instance.client
+        .from('room_members:room_id=eq.$roomId')
+        .stream(primaryKey: ['id'])
+        .listen((data) {
+      setState(() {
+        players = data.map((m) => GamePlayer(id: m['user_id'])).toList();
+        if (!players.any((p) => p.id == currentUserId)) {
+          players.add(GamePlayer(id: currentUserId));
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _roomSubscription?.cancel();
+    super.dispose();
+  }
+
+  void _updateCommunityCards() {
     setState(() {
-      bettingRound = BettingRound(activePlayers);
-      bettingRound!.currentBet = 0;
-      roundStartContributions.clear();
-      for (var p in activePlayers) {
-        roundStartContributions[p] = playerContributions[p] ?? 0;
+      if (phase == GamePhase.Preflop) {
+        communityCardsDisplayed =
+            List.generate(5, (_) => CardModel(suit: '', rank: 'BACK'));
+      } else if (phase == GamePhase.Flop) {
+        communityCardsDisplayed = [
+          communityCardsFull[0],
+          communityCardsFull[1],
+          communityCardsFull[2],
+          CardModel(suit: '', rank: 'BACK'),
+          CardModel(suit: '', rank: 'BACK'),
+        ];
+      } else if (phase == GamePhase.Turn) {
+        communityCardsDisplayed = [
+          communityCardsFull[0],
+          communityCardsFull[1],
+          communityCardsFull[2],
+          communityCardsFull[3],
+          CardModel(suit: '', rank: 'BACK'),
+        ];
+      } else if (phase == GamePhase.River || phase == GamePhase.Showdown) {
+        communityCardsDisplayed = communityCardsFull;
       }
     });
   }
 
-  void advanceStage() {
+  Future<void> _makeBet(int amount) async {
+    GamePlayer player = players[currentPlayerIndex];
+    if (amount <= 0 || player.money < amount) return;
     setState(() {
-      if (stage == 0) {
-        communityCardsFaceUp[0] = true;
-        communityCardsFaceUp[1] = true;
-        communityCardsFaceUp[2] = true;
-        stage = 1;
-        resetBettingRound();
-      } else if (stage == 1) {
-        communityCardsFaceUp[3] = true;
-        stage = 2;
-        resetBettingRound();
-      } else if (stage == 2) {
-        communityCardsFaceUp[4] = true;
-        stage = 3;
-        resetBettingRound();
-      } else if (stage == 3) {
-        showResults();
+      player.money -= amount;
+      roundBets[player.id] = (roundBets[player.id] ?? 0) + amount;
+      potTotal += amount;
+      if ((roundBets[player.id] ?? 0) > currentBet) {
+        currentBet = roundBets[player.id]!;
       }
     });
+    _advanceTurn();
   }
 
-  double callAmount(String player) {
-    double currentRoundContribution = (playerContributions[player] ?? 0) - (roundStartContributions[player] ?? 0);
-    return bettingRound!.currentBet - currentRoundContribution;
+  Future<void> _call() async {
+    GamePlayer player = players[currentPlayerIndex];
+    int needed = currentBet - (roundBets[player.id] ?? 0);
+    if (needed <= 0 || player.money < needed) return;
+    setState(() {
+      player.money -= needed;
+      roundBets[player.id] = (roundBets[player.id] ?? 0) + needed;
+      potTotal += needed;
+    });
+    _advanceTurn();
   }
 
-  void onBetPlaced(double amount) {
-    if (bettingRound != null) {
-      String currentPlayer = bettingRound!.getCurrentPlayer();
-      if (playerChips[currentPlayer]! >= amount) {
-        playerChips[currentPlayer] = playerChips[currentPlayer]! - amount;
-        playerContributions[currentPlayer] =
-            (playerContributions[currentPlayer] ?? 0) + amount;
-        bettingRound!.currentBet = amount;
-        bettingRound!.nextPlayer();
-        setState(() {});
-        checkBettingRoundComplete();
+  void _check() {
+    if ((roundBets[players[currentPlayerIndex].id] ?? 0) == currentBet) {
+      _advanceTurn();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("You must call or bet instead of checking.")));
+    }
+  }
+
+  void _fold() {
+    setState(() {
+      players[currentPlayerIndex].folded = true;
+    });
+    _advanceTurn();
+  }
+
+  void _advanceTurn() {
+    if (!_isBettingRoundComplete() || players.length < 2) return;
+    bettingRoundActive = false;
+    Future.delayed(const Duration(seconds: 1), _nextPhase);
+  }
+
+  bool _isBettingRoundComplete() {
+    int? target;
+    for (var player in players) {
+      if (player.folded) continue;
+      int bet = roundBets[player.id] ?? 0;
+      target ??= bet;
+      if (bet != target) return false;
+    }
+    return true;
+  }
+
+  void _resetBettingRound() {
+    currentBet = 0;
+    bettingRoundActive = true;
+    for (var player in players) {
+      roundBets[player.id] = 0;
+    }
+    currentPlayerIndex = 0;
+  }
+
+  int evaluateHand(GamePlayer player) {
+    // For simplicity, highest card wins.
+    List<CardModel> available = []..addAll(player.hand);
+    if (phase == GamePhase.River || phase == GamePhase.Showdown) {
+      available.addAll(communityCardsFull);
+    }
+    int best = 0;
+    for (var card in available) {
+      if (card.rank == 'BACK' || card.rank.isEmpty) continue;
+      best = max(best, rankValues[card.rank] ?? 0);
+    }
+    return best;
+  }
+
+  void _determineWinners() {
+    List<GamePlayer> contenders = players.where((p) => !p.folded).toList();
+    if (contenders.isEmpty) return;
+    int bestScore = 0;
+    List<GamePlayer> winners = [];
+    for (var player in contenders) {
+      int score = evaluateHand(player);
+      if (score > bestScore) {
+        bestScore = score;
+        winners = [player];
+      } else if (score == bestScore) {
+        winners.add(player);
       }
     }
-  }
-
-  void onCall() {
-    if (bettingRound != null) {
-      String currentPlayer = bettingRound!.getCurrentPlayer();
-      double callAmt = callAmount(currentPlayer);
-      if (playerChips[currentPlayer]! >= callAmt) {
-        playerChips[currentPlayer] = playerChips[currentPlayer]! - callAmt;
-        playerContributions[currentPlayer] =
-            (playerContributions[currentPlayer] ?? 0) + callAmt;
-        bettingRound!.nextPlayer();
-        setState(() {});
-        checkBettingRoundComplete();
-      }
+    int share = (potTotal / winners.length).floor();
+    for (var winner in winners) {
+      winner.money += share;
     }
-  }
-
-  void onRaise(double raiseAmt) {
-    if (bettingRound != null) {
-      String currentPlayer = bettingRound!.getCurrentPlayer();
-      double callAmt = callAmount(currentPlayer);
-      double totalRequired = callAmt + raiseAmt;
-      if (playerChips[currentPlayer]! >= totalRequired) {
-        playerChips[currentPlayer] = playerChips[currentPlayer]! - totalRequired;
-        playerContributions[currentPlayer] =
-            (playerContributions[currentPlayer] ?? 0) + totalRequired;
-        bettingRound!.currentBet = bettingRound!.currentBet + raiseAmt;
-        bettingRound!.nextPlayer();
-        setState(() {});
-        checkBettingRoundComplete();
-      }
-    }
-  }
-
-  void onFold() {
-    if (bettingRound != null) {
-      String currentPlayer = bettingRound!.getCurrentPlayer();
-      foldedPlayers.add(currentPlayer);
-      bettingRound!.nextPlayer();
-      setState(() {});
-      checkBettingRoundComplete();
-    }
-  }
-
-  void onCheck() {
-    if (bettingRound != null) {
-      String currentPlayer = bettingRound!.getCurrentPlayer();
-      double callAmt = 0.0;
-      if (playerChips[currentPlayer]! >= callAmt) {
-        playerChips[currentPlayer] = playerChips[currentPlayer]! - callAmt;
-        playerContributions[currentPlayer] =
-            (playerContributions[currentPlayer] ?? 0) + callAmt;
-        bettingRound!.nextPlayer();
-        setState(() {});
-        checkBettingRoundComplete();
-      }
-    }
-  }
-
-  void checkBettingRoundComplete() {
-    if (bettingRound == null) return;
-    bool complete = true;
-    for (var player in bettingRound!.players) {
-      if (foldedPlayers.contains(player)) continue;
-      double contributed = (playerContributions[player] ?? 0) - (roundStartContributions[player] ?? 0);
-      if (contributed != bettingRound!.currentBet) {
-        complete = false;
-        break;
-      }
-    }
-    if (complete) {
-      advanceStage();
-    }
-  }
-
-  void showResults() {
-    List<String> eligiblePlayers =
-        currentRoom!.players.where((p) => !foldedPlayers.contains(p)).toList();
-
-    Map<String, HandValue> handValues = {};
-    for (var player in eligiblePlayers) {
-      List<String> allCards = [];
-      allCards.addAll(playerCards[player] ?? []);
-      allCards.addAll(communityCards);
-      handValues[player] = evaluateHand(allCards);
-    }
-
-    List<double> contribValues = playerContributions.values.toList()..sort();
-    List<double> uniqueContribs = contribValues.toSet().toList()..sort();
-
-    double previous = 0;
-    Map<String, double> winnings = {for (var p in currentRoom!.players) p: 0.0};
-
-    for (var threshold in uniqueContribs) {
-      List<String> potPlayers =
-          playerContributions.keys.where((p) => playerContributions[p]! >= threshold).toList();
-      double potAmount = (threshold - previous) * potPlayers.length;
-      previous = threshold;
-      List<String> eligibleForPot =
-          potPlayers.where((p) => !foldedPlayers.contains(p)).toList();
-      if (eligibleForPot.isEmpty) continue;
-      HandValue bestHand = handValues[eligibleForPot.first]!;
-      for (var p in eligibleForPot.skip(1)) {
-        if (handValues[p]!.compareTo(bestHand) > 0) bestHand = handValues[p]!;
-      }
-      List<String> winners = eligibleForPot.where((p) => handValues[p]!.compareTo(bestHand) == 0).toList();
-      double share = potAmount / winners.length;
-      for (var p in winners) {
-        winnings[p] = (winnings[p] ?? 0) + share;
-      }
-    }
-
     showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Showdown'),
+        content: Text(
+            'Winner(s): ${winners.map((w) => w.id).join(", ")} with high card value $bestScore.\nEach wins: \$$share'),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          )
+        ],
+      ),
+    );
+  }
+
+  void _nextPhase() {
+    setState(() {
+      if (phase == GamePhase.Preflop) {
+        phase = GamePhase.Flop;
+      } else if (phase == GamePhase.Flop) {
+        phase = GamePhase.Turn;
+      } else if (phase == GamePhase.Turn) {
+        phase = GamePhase.River;
+      } else if (phase == GamePhase.River) {
+        phase = GamePhase.Showdown;
+        _determineWinners();
+      }
+      _updateCommunityCards();
+      if (phase != GamePhase.Showdown) _resetBettingRound();
+    });
+  }
+
+  Future<void> _showBetDialog(String action) async {
+    _betController.clear();
+    await showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: Text("Hand Results"),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: winnings.entries.map((entry) {
-              String status = foldedPlayers.contains(entry.key) ? "Folded" : "Active";
-              return Text("${entry.key} wins \$${entry.value.toStringAsFixed(2)} ($status)");
-            }).toList(),
+          title: Text('$action Amount'),
+          content: TextField(
+            controller: _betController,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(hintText: 'Enter amount'),
           ),
           actions: [
             ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
               onPressed: () {
-                Navigator.pop(context);
-                startNewHand();
+                int amount = int.tryParse(_betController.text.trim()) ?? 0;
+                Navigator.of(context).pop();
+                if (action == 'Bet' || action == 'Raise') _makeBet(amount);
               },
-              child: Text("Next Hand"),
+              child: const Text('Submit'),
             )
           ],
         );
@@ -638,174 +571,152 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 
-  String getCardImagePath(String card) {
-    String suit;
-    String value = card.substring(0, card.length - 1);
-    switch (card.substring(card.length - 1)) {
-      case 'H':
-        suit = 'hearts';
-        break;
-      case 'D':
-        suit = 'diamonds';
-        break;
-      case 'C':
-        suit = 'clubs';
-        break;
-      case 'S':
-        suit = 'spades';
-        break;
-      default:
-        suit = '';
-    }
-    if (value == '10' || value == '010') value = '10';
-    else if (value == 'J') value = 'J';
-    else if (value == 'Q') value = 'Q';
-    else if (value == 'K') value = 'K';
-    else if (value == 'A') value = 'A';
-    else value = value.padLeft(2, '0');
-    return 'assets/images/card_${suit}_$value.png';
+  String _cardImagePath(CardModel card) {
+    if (card.rank == 'BACK') return 'assets/images/card_back.png';
+    return 'assets/images/${card.imageName}';
   }
 
   @override
   Widget build(BuildContext context) {
-    String currentPlayer = bettingRound?.getCurrentPlayer() ?? "";
-    double currentChips = currentPlayer.isNotEmpty ? (playerChips[currentPlayer] ?? 0) : 0;
-    double currentRoundContribution = currentPlayer.isNotEmpty
-        ? (playerContributions[currentPlayer] ?? 0) - (roundStartContributions[currentPlayer] ?? 0)
-        : 0;
-    double callAmt = bettingRound != null ? bettingRound!.currentBet - currentRoundContribution : 0;
-
+    final screenWidth = MediaQuery.of(context).size.width;
+    const tableHeight = 400.0;
     return Scaffold(
-      appBar: AppBar(title: Text('Texas Holdem Game')),
-      body: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text('Community Cards', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: communityCards.asMap().entries.map((entry) {
-              int index = entry.key;
-              String card = entry.value;
-              return Padding(
-                padding: const EdgeInsets.all(8.0),
-                child: Image.asset(
-                  communityCardsFaceUp[index]
-                      ? getCardImagePath(card)
-                      : 'assets/images/card_back.png',
-                  width: 50,
-                  height: 75,
-                ),
-              );
-            }).toList(),
-          ),
-          SizedBox(height: 20),
-          Text('Player Cards', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-          Expanded(
-            child: ListView.builder(
-              itemCount: currentRoom?.players.length ?? 0,
-              itemBuilder: (context, index) {
-                String player = currentRoom!.players[index];
-                List<String>? cards = playerCards[player];
-                return ListTile(
-                  title: Text(
-                      "$player (\$${(playerChips[player] ?? currentRoom!.startingCash).toStringAsFixed(2)})"),
-                  subtitle: Row(
-                    children: (cards ?? []).map((card) => Padding(
-                          padding: const EdgeInsets.all(4.0),
-                          child: Image.asset(
-                            currentRoom!.host == player
-                                ? getCardImagePath(card)
-                                : 'assets/images/card_back.png',
-                            width: 50,
-                            height: 75,
-                          ),
-                        )).toList(),
-                  ),
-                );
-              },
+      appBar: AppBar(
+        title: Text(isHost && joinCode != null ? 'Room: $roomId | Code: $joinCode' : 'Room: $roomId'),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            Text(
+              'Pot: \$$potTotal    Current Bet: \$$currentBet',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
-          ),
-          Divider(),
-          if (bettingRound != null && currentPlayer.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                children: [
-                  Text('Current Player: $currentPlayer', style: TextStyle(fontSize: 20)),
-                  Text('Your Chips: \$${currentChips.toStringAsFixed(2)}', style: TextStyle(fontSize: 16)),
-                  Text('Current Bet: \$${bettingRound!.currentBet.toStringAsFixed(2)}', style: TextStyle(fontSize: 16)),
-                  Text('Call Amount: \$${callAmt.toStringAsFixed(2)}', style: TextStyle(fontSize: 16)),
-                  SizedBox(height: 10),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Column(
-                        children: [
-                          ElevatedButton(
-                            onPressed: () {
-                              double betAmount = double.tryParse(_betController.text) ?? 0;
-                              onBetPlaced(betAmount);
-                              _betController.clear();
-                            },
-                            child: Text('Bet'),
-                          ),
-                          SizedBox(height: 5),
-                          SizedBox(
-                            width: 80,
-                            child: TextField(
-                              controller: _betController,
-                              decoration: InputDecoration(labelText: 'Amount'),
-                              keyboardType: TextInputType.number,
+            const SizedBox(height: 10),
+            Text('Phase: ${phase.toString().split('.').last}', style: const TextStyle(fontSize: 18)),
+            const SizedBox(height: 10),
+            if (!gameStarted)
+              isHost
+                  ? (players.length > 1
+                      ? ElevatedButton(
+                          onPressed: () {
+                            setState(() {
+                              gameStarted = true;
+                              _resetBettingRound();
+                              // Optionally assign cards to each player.
+                              // Here we only assign two cards to the host.
+                              players.firstWhere((p) => p.id == currentUserId).hand =
+                                  [deck.dealCard(), deck.dealCard()];
+                            });
+                          },
+                          child: const Text('Start Game'),
+                        )
+                      : const Text('Waiting for opponents...',
+                          style: TextStyle(fontSize: 16, fontStyle: FontStyle.italic)))
+                  : const Text('Waiting for host to start the game...',
+                      style: TextStyle(fontSize: 16, fontStyle: FontStyle.italic))
+            else ...[
+              if (players.length > 1 && bettingRoundActive)
+                Text('Current Turn: ${players[currentPlayerIndex].id}',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 20),
+              Container(
+                width: double.infinity,
+                height: tableHeight,
+                child: Stack(
+                  children: [
+                    Align(
+                      alignment: Alignment.center,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: communityCardsDisplayed.map((card) {
+                          return Padding(
+                            padding: const EdgeInsets.all(4.0),
+                            child: Image.asset(_cardImagePath(card), width: 50),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                    ...players.asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final angle = (index / players.length) * 2 * pi;
+                      const radius = 150.0;
+                      final offsetX = radius * cos(angle);
+                      final offsetY = radius * sin(angle);
+                      final player = entry.value;
+                      return Positioned(
+                        left: (screenWidth / 2) + offsetX - 45,
+                        top: (tableHeight / 2) + offsetY - 20,
+                        child: Column(
+                          children: [
+                            Text('Player: ${player.id}'),
+                            Text('Money: \$${player.money}'),
+                            Row(
+                              children: (player.id == currentUserId || phase == GamePhase.Showdown)
+                                  ? player.hand.map((card) {
+                                      return Padding(
+                                        padding: const EdgeInsets.all(2.0),
+                                        child: Image.asset(_cardImagePath(card), width: 40),
+                                      );
+                                    }).toList()
+                                  : [
+                                      Image.asset('assets/images/card_back.png', width: 40),
+                                      const SizedBox(width: 4),
+                                      Image.asset('assets/images/card_back.png', width: 40),
+                                    ],
                             ),
-                          ),
-                        ],
-                      ),
-                      SizedBox(width: 10),
-                      ElevatedButton(
-                        onPressed: onCall,
-                        child: Text('Call'),
-                      ),
-                      SizedBox(width: 10),
-                      Column(
-                        children: [
-                          ElevatedButton(
-                            onPressed: bettingRound!.currentBet == 0
-                                ? null
-                                : () {
-                                    double raiseAmt = double.tryParse(_raiseController.text) ?? 0;
-                                    onRaise(raiseAmt);
-                                    _raiseController.clear();
-                                  },
-                            child: Text('Raise'),
-                          ),
-                          SizedBox(height: 5),
-                          SizedBox(
-                            width: 80,
-                            child: TextField(
-                              controller: _raiseController,
-                              decoration: InputDecoration(labelText: 'Amount'),
-                              keyboardType: TextInputType.number,
-                            ),
-                          ),
-                        ],
-                      ),
-                      SizedBox(width: 10),
-                      ElevatedButton(
-                        onPressed: onFold,
-                        child: Text('Fold'),
-                      ),
-                      SizedBox(width: 10),
-                      if (bettingRound!.currentBet == 0)
-                        ElevatedButton(
-                          onPressed: onCheck,
-                          child: Text('Check'),
+                            Text('Bet: \$${roundBets[player.id] ?? 0}'),
+                          ],
                         ),
-                    ],
-                  ),
-                ],
+                      );
+                    }).toList(),
+                  ],
+                ),
               ),
-            ),
-        ],
+              const SizedBox(height: 20),
+              if (players.length > 1 && bettingRoundActive)
+                (players[currentPlayerIndex].id == currentUserId)
+                    ? Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          ElevatedButton(
+                              onPressed: () => _showBetDialog('Bet'),
+                              child: const Text('Bet')),
+                          ElevatedButton(
+                              onPressed: _call, child: const Text('Call')),
+                          ElevatedButton(
+                              onPressed: () => _showBetDialog('Raise'),
+                              child: const Text('Raise')),
+                          ElevatedButton(
+                              onPressed: _fold, child: const Text('Fold')),
+                          ElevatedButton(
+                              onPressed: ((roundBets[players[currentPlayerIndex].id] ?? 0) ==
+                                      currentBet)
+                                  ? _check
+                                  : null,
+                              child: const Text('Check')),
+                        ],
+                      )
+                    : const Text('Waiting for your turn...'),
+              const SizedBox(height: 20),
+              const Text('Your Cards:',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: players
+                    .firstWhere((p) => p.id == currentUserId, orElse: () => GamePlayer(id: currentUserId))
+                    .hand
+                    .map((card) {
+                  return Padding(
+                    padding: const EdgeInsets.all(4.0),
+                    child: Image.asset(_cardImagePath(card), width: 60),
+                  );
+                }).toList(),
+              ),
+            ]
+          ],
+        ),
       ),
     );
   }
